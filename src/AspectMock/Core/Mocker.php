@@ -1,60 +1,115 @@
 <?php
 namespace AspectMock\Core;
-use AspectMock\Invocation\Verify;
+use AspectMock\Intercept\FunctionInjector;
 use Go\Aop\Aspect;
-use Go\Aop\Intercept\MethodInvocation;
-use Go\Lang\Annotation\Around;
-use Go\Lang\Annotation\After;
-use Go\Lang\Annotation\DeclareParents;
+use AspectMock\Intercept\MethodInvocation;
 
 class Mocker implements Aspect {
 
     protected $classMap = [];
     protected $objectMap = [];
-    protected $classCalls = [];
+    protected $funcMap = [];
+    protected $methodMap = ['__call', '__callStatic'];
 
-    /**
-     * @DeclareParents(value="**", interface="AspectMock\Invocation\Verifiable", defaultImpl="AspectMock\Invocation\Verify")
-     *
-     * @var null
-     */
-    protected $introduction = null;
-
-    /**
-     * @Around("within(**)")
-     */
-    public function stubMethods(MethodInvocation $invocation)
+    public function fakeMethodsAndRegisterCalls($class, $declaredClass, $method, $params, $static)
     {
-        $obj = $invocation->getThis();
-        if (is_object($obj)) {
-            $params = $this->getObjectMethodStubParams($obj, $invocation->getMethod()->name);
-            if ($params !== false) return $this->stub($invocation, $params);
+//        $method = $invocation->getMethod();
+//        $obj = $invocation->getThis();
+        $result = __AM_CONTINUE__;
 
-            $params = $this->getClassMethodStubParams(get_class($obj), $invocation->getMethod()->name);
-            if ($params !== false) return $this->stub($invocation, $params);
-        } else {
-            $params = $this->getClassMethodStubParams($obj, $invocation->getMethod()->name);
-            if ($params !== false) return $this->stub($invocation, $params);
+        if (in_array($method, $this->methodMap)) {
+            $invocation = new \AspectMock\Intercept\MethodInvocation();
+            $invocation->setThis($class);
+            $invocation->setMethod($method);
+            $invocation->setArguments($params);
+            $invocation->isStatic($static);
+            $invocation->setDeclaredClass($declaredClass);
+            $result = $this->invokeFakedMethods($invocation);
         }
-        return $invocation->proceed();
+
+        if (!$static) {
+            if (isset($this->objectMap[spl_object_hash($class)])) Registry::registerInstanceCall($class, $method, $params);
+            $class = get_class($class);
+        }
+
+        if (isset($this->classMap[$class])) Registry::registerClassCall($class, $method, $params);
+        return $result;
     }
 
-    /**
-     * @After("within(**)", scope="target")
-     */
-    public function registerMethodCalls(MethodInvocation $invocation)
+    public function fakeFunctionAndRegisterCalls($namespace, $function, $args)
     {
-        $obj = $invocation->getThis();
-        $method = $invocation->getMethod()->name;
-        if (is_object($obj)) {
-            isset($obj->____calls[$method])
-                ? $obj->____calls[$method][] = $invocation->getArguments()
-                : $obj->____calls[$method] = array($invocation->getArguments());
-            $class = get_class($obj);
-        } else {
-            $class = $obj;
+        $result = __AM_CONTINUE__;
+        $fullFuncName = "$namespace\\$function";
+        Registry::registerFunctionCall($fullFuncName, $args);
+
+        if (isset($this->funcMap[$fullFuncName])) {
+            $func = $this->funcMap[$fullFuncName];
+            if (is_callable($func)) {
+                $result = call_user_func_array($func, $args);
+            } else {
+                $result = $func;
+            }
         }
-        Registry::registerClassCall($class, $method, $invocation->getArguments());
+        return $result;
+    }
+
+    protected function invokeFakedMethods(MethodInvocation $invocation)
+    {
+        $method = $invocation->getMethod();
+        if (!in_array($method, $this->methodMap)) return __AM_CONTINUE__;
+
+        $obj = $invocation->getThis();
+
+        if (is_object($obj)) {
+            // instance method
+            $params = $this->getObjectMethodStubParams($obj, $method);
+            if ($params !== false) return $this->stub($invocation, $params);
+
+            // class method
+            $params = $this->getClassMethodStubParams(get_class($obj), $method);
+            if ($params !== false) return $this->stub($invocation, $params);
+
+            // inheritance
+            $params = $this->getClassMethodStubParams($invocation->getDeclaredClass(), $method);
+            if ($params !== false) return $this->stub($invocation, $params);
+
+            // magic methods
+            if ($method == '__call') {
+                $args = $invocation->getArguments();
+                $method = array_shift($args);
+
+                $params = $this->getObjectMethodStubParams($obj, $method);
+                if ($params !== false) return $this->stubMagicMethod($invocation, $params);
+
+                // magic class method
+                $params = $this->getClassMethodStubParams(get_class($obj), $method);
+                if ($params !== false) return $this->stubMagicMethod($invocation, $params);
+
+                // inheritance
+                $calledClass = $invocation->getDeclaredClass();
+                $params = $this->getClassMethodStubParams($calledClass, $method);
+                if ($params !== false) return $this->stubMagicMethod($invocation, $params);
+            }
+        } else {
+            // static method
+            $params = $this->getClassMethodStubParams($obj, $method);
+            if ($params !== false) return $this->stub($invocation, $params);
+
+            // magic static method (facade)
+            if ($method == '__callStatic') {
+                $args = $invocation->getArguments();
+                $method = array_shift($args);
+
+                $params = $this->getClassMethodStubParams($obj, $method);
+                if ($params !== false) return $this->stubMagicMethod($invocation, $params);
+
+                // inheritance
+                $calledClass = $invocation->getDeclaredClass();
+                $params = $this->getClassMethodStubParams($calledClass, $method);
+                if ($params !== false) return $this->stubMagicMethod($invocation, $params);
+            }
+        }
+        return __AM_CONTINUE__;
     }
 
     protected function getObjectMethodStubParams($obj, $method_name)
@@ -63,7 +118,7 @@ class Mocker implements Aspect {
         if (!isset($this->objectMap[$oid])) return false;
         $params = $this->objectMap[$oid];
         if (!array_key_exists($method_name,$params)) return false;
-        return $params[$method_name];
+        return $params;
     }
 
     protected function getClassMethodStubParams($class_name, $method_name)
@@ -73,26 +128,43 @@ class Mocker implements Aspect {
         if (!array_key_exists($method_name,$params)) return false;
         return $params;
     }
-    
+
     protected function stub(MethodInvocation $invocation, $params)
     {
-        $name = $invocation->getMethod()->name;
+        $name = $invocation->getMethod();
 
         $replacedMethod = $params[$name];
 
-        if (!($replacedMethod instanceof \Closure)) $replacedMethod = $this->turnToClosure($replacedMethod);
+        $replacedMethod = $this->turnToClosure($replacedMethod);
 
-        if ($invocation->getMethod()->isStatic()) {
+        if ($invocation->isStatic()) {
             \Closure::bind($replacedMethod, null, $invocation->getThis());
         } else {
             $replacedMethod = $replacedMethod->bindTo($invocation->getThis(), get_class($invocation->getThis()));
         }
-        $invocation->getArguments();
         return call_user_func_array($replacedMethod, $invocation->getArguments());
     }
 
+    protected function stubMagicMethod(MethodInvocation $invocation, $params)
+    {
+        $args = $invocation->getArguments();
+        $name = array_shift($args);
+
+        $replacedMethod = $params[$name];
+        $replacedMethod = $this->turnToClosure($replacedMethod);
+
+        if ($invocation->isStatic()) {
+            \Closure::bind($replacedMethod, null, $invocation->getThis());
+        } else {
+            $replacedMethod = $replacedMethod->bindTo($invocation->getThis(), get_class($invocation->getThis()));
+        }
+        return call_user_func_array($replacedMethod, $args);
+    }
+
+
     protected function turnToClosure($returnValue)
     {
+        if ($returnValue instanceof \Closure) return $returnValue;
         return function() use ($returnValue) {
             return $returnValue;
         };
@@ -101,18 +173,46 @@ class Mocker implements Aspect {
     public function registerClass($class, $params = array())
     {
         $class = ltrim($class,'\\');
+        if (isset($this->classMap[$class])) {
+            $params = array_merge($this->classMap[$class], $params);
+        }
+        $this->methodMap = array_merge($this->methodMap, array_keys($params));
         $this->classMap[$class] = $params;
     }
 
     public function registerObject($object, $params = array())
     {
-        $this->objectMap[spl_object_hash($object)] = $params;
+        $hash = spl_object_hash($object);
+        if (isset($this->objectMap[$hash])) {
+            $params = array_merge($this->objectMap[$hash], $params);
+        }
+        $this->objectMap[$hash] = $params;
+        $this->methodMap = array_merge($this->methodMap, array_keys($params));
     }
 
-    public function clean()
+    public function registerFunc($namespace, $func, $body)
     {
-        $this->classMap = [];
-        $this->objectMap = [];
-        $this->classCalls = [];
+        $namespace = ltrim($namespace,'\\');
+        if (!function_exists("$namespace\\$func")) {
+            $injector = new FunctionInjector($namespace, $func);
+            $injector->save();
+            $injector->inject();
+        }
+        $this->funcMap["$namespace\\$func"] = $body;
     }
+
+    public function clean($objectOrClass = null)
+    {
+        if (!$objectOrClass) {
+            $this->classMap = [];
+            $this->objectMap = [];
+            $this->methodMap = ['__call','__callStatic'];
+            $this->funcMap = [];
+        } elseif (is_object($objectOrClass)) {
+            unset($this->objectMap[spl_object_hash($objectOrClass)]);
+        } else {
+            unset($this->classMap[$objectOrClass]);
+        }
+    }
+
 }

@@ -1,10 +1,13 @@
 <?php
 namespace demo;
-use AspectMock\Core\ClassProxy;
 use \AspectMock\Core\Registry as double;
+use AspectMock\Proxy\ClassProxy;
+use AspectMock\Proxy\InstanceProxy;
 
 class MockTest extends \PHPUnit_Framework_TestCase
 {
+    use \Codeception\Specify;
+
     protected function tearDown()
     {
         double::clean();
@@ -15,14 +18,22 @@ class MockTest extends \PHPUnit_Framework_TestCase
     {
         $user = new UserModel();
         double::registerObject($user);
+        $user = new InstanceProxy($user);
         $user->setName('davert');
-        $user->verifyInvoked('setName');
-        $user->verifyInvoked('setName',['davert']);
-        $user->verifyInvokedMultipleTimes('setName',1);
-        $user->verifyInvokedMultipleTimes('setName',1,['davert']);
-        $user->verifyNeverInvoked('save');
-        $user->verifyNeverInvoked('save',['params']);
-        $user->verifyNeverInvoked('setName',['bugoga']);
+
+        $this->specify('setName() was invoked', function() use ($user) {
+            $user->verifyInvoked('setName');
+            $user->verifyInvoked('setName',['davert']);
+            $user->verifyInvokedMultipleTimes('setName',1);
+            $user->verifyInvokedMultipleTimes('setName',1,['davert']);
+            $user->verifyNeverInvoked('setName',['bugoga']);
+        });
+
+        $this->specify('save() was not invoked', function() use ($user) {
+            $user->verifyNeverInvoked('save');
+            $user->verifyNeverInvoked('save',['params']);
+        });
+
     }
 
     public function testVerifyClassMethods()
@@ -50,6 +61,7 @@ class MockTest extends \PHPUnit_Framework_TestCase
     {
         $user = new UserModel();
         double::registerObject($user);
+        $user = new InstanceProxy($user);
         $user->setName('davert');
         $user->setName('jon');
         $user->verifyInvokedOnce('setName',['davert']);
@@ -66,8 +78,8 @@ class MockTest extends \PHPUnit_Framework_TestCase
         $userProxy->verifyInvokedOnce('setName',['jon']);
         $userProxy->verifyNeverInvoked('save');
         $userProxy->verifyNeverInvoked('setName',['bob']);
+        verify($user->getName())->equals('jon');
 
     }
-
 
 }
